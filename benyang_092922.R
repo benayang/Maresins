@@ -146,33 +146,42 @@ to.plot <- to.plot[,c(1:15,21:25,31:35,16:20,26:30,36:40)] # reorder columns
 #                             Injury = factor(c(rep('Uninjured',10), 
 #                                               rep('1mm', 14), 
 #                                               rep('2mm', 14))))
-annotation.df <- data.frame(Time = factor(c(rep('Day 0',10), 
-                                            rep('Day 3', 5), 
-                                            rep('Day 7', 5), 
-                                            rep('Day 14', 5), 
-                                            rep('Day 3', 5), 
-                                            rep('Day 7', 5), 
-                                            rep('Day 14', 5))),
-                            Injury = factor(c(rep('Uninjured',10), 
-                                              rep('1mm', 15), 
-                                              rep('2mm', 15))))
-rownames(annotation.df) <- colnames(to.plot)
+# annotation.df <- data.frame(Time = factor(c(rep('Day 0',10), 
+#                                             rep('Day 3', 5), 
+#                                             rep('Day 7', 5), 
+#                                             rep('Day 14', 5), 
+#                                             rep('Day 3', 5), 
+#                                             rep('Day 7', 5), 
+#                                             rep('Day 14', 5))),
+#                             Injury = factor(c(rep('Uninjured',10), 
+#                                               rep('1mm', 15), 
+#                                               rep('2mm', 15))))
+# rownames(annotation.df) <- colnames(to.plot)
 mat_breaks <- seq(-2, 2, length.out = 100)
 
 # Specify colors
-ann_colors = list(
-  Time = c("Day 0" = "grey60", 
-           "Day 3" = col_vector[1], 
-           "Day 7" = col_vector[2], 
-           "Day 14" = col_vector[3]),
-  Injury = c("Uninjured" = col_vector[5], 
-             "1mm" = col_vector[6], 
-             "2mm" = col_vector[7])
+# ann_colors = list(
+#   Time = c("Day 0" = "grey60", 
+#            "Day 3" = col_vector[1], 
+#            "Day 7" = col_vector[2], 
+#            "Day 14" = col_vector[3]),
+#   Injury = c("Uninjured" = col_vector[5], 
+#              "1mm" = col_vector[6], 
+#              "2mm" = col_vector[7])
+# )
+ann_colors <- list(
+  Time = c("grey60", col_vector[1:3]),
+  Injury = col_vector[5:7],
+  Leg = col_vector[8:11]
 )
-png(file.path(projdir,"Plots","Heatmap_Top25_DELipids.png"), height = 7.5, width = 7, res = 300, units = 'in')
+names(ann_colors$Time) <- unique(as.data.frame(colData(met))$Time)
+names(ann_colors$Injury) <- unique(as.data.frame(colData(met))$Injury)
+names(ann_colors$Leg) <- unique(as.data.frame(colData(met))$Leg)
+
+png(file.path(projdir,"Plots","Heatmap_Top25_DELipids.png"), height = 10, width = 10, res = 300, units = 'in')
 pheatmap(to.plot,
-  color = colorRampPalette(rev(brewer.pal(n = 7, name = "RdBu")))(100),
-  annotation_col = annotation.df,
+  color = colorRampPalette(rev(brewer.pal(n = 11, name = "RdBu")))(250),
+  annotation_col = as.data.frame(colData(met))[,c("Time","Injury","Leg")],
   annotation_colors = ann_colors,
   annotation_legend = TRUE,
   border_color = NA,
@@ -196,12 +205,14 @@ dev.off()
 # Heatmap for all DE lipids
 #####################################################################################
 
+sig_metabolites <- data.stats %>% filter(pval.injury < 0.05) %>% pull(Lipid)
+
 #to.plot <- to.plot[,c(1:15,20:23,29:33,16:19,24:28,34:38)] # reorder columns, if removing samples
-all.plot <- data.raw[,c(1:15,21:25,31:35,16:20,26:30,36:40)] # reorder columns
+all.de.plot <- data.raw[sig_metabolites,c(1:15,21:25,31:35,16:20,26:30,36:40)] # reorder columns
 png(file.path(projdir,"Plots","Heatmap_all_DELipids.png"), height = 12, width = 10, res = 300, units = 'in')
-pheatmap(all.plot,
-  color = colorRampPalette(rev(brewer.pal(n = 7, name = "RdBu")))(250),
-  annotation_col = annotation.df,
+pheatmap(all.de.plot,
+  color = colorRampPalette(rev(brewer.pal(n = 11, name = "RdBu")))(250),
+  annotation_col = as.data.frame(colData(met))[,c("Time","Injury","Leg")],
   annotation_colors = ann_colors,
   annotation_legend = TRUE,
   border_color = NA,
@@ -215,6 +226,35 @@ pheatmap(all.plot,
   show_rownames = T,
   show_colnames = T,
   main = "All DE Lipids",
+  fontsize = 10,
+  angle_col = "90",
+  gaps_col = c(10,25)
+)
+dev.off()
+
+#####################################################################################
+# Heatmap for all lipids
+#####################################################################################
+
+#to.plot <- to.plot[,c(1:15,20:23,29:33,16:19,24:28,34:38)] # reorder columns, if removing samples
+all.plot <- data.raw[,c(1:15,21:25,31:35,16:20,26:30,36:40)] # reorder columns
+png(file.path(projdir,"Plots","Heatmap_all_Lipids.png"), height = 12, width = 10, res = 300, units = 'in')
+pheatmap(all.plot,
+  color = colorRampPalette(rev(brewer.pal(n = 11, name = "RdBu")))(250),
+  annotation_col = as.data.frame(colData(met))[,c("Time","Injury","Leg")],
+  annotation_colors = ann_colors,
+  annotation_legend = TRUE,
+  border_color = NA,
+  #breaks = mat_breaks,
+  scale = "row",
+  cluster_rows = TRUE,
+  cluster_cols = FALSE,
+  clustering_distance_rows = "euclidean",
+  clustering_method = "complete",
+  legend = TRUE,
+  show_rownames = T,
+  show_colnames = T,
+  main = "All Lipids",
   fontsize = 10,
   angle_col = "90",
   gaps_col = c(10,25)
@@ -251,7 +291,6 @@ export_data_for_dpgp <- function(data, meta_data, prefix) {
   return(list(data_avg = data_avg, data_fc = data_fc, data_fc_zscore = data_fc_zscore))
 }
 
-sig_metabolites <- data.stats %>% filter(pval.injury < 0.05) %>% pull(Lipid)
 sig_data <- data.norm[sig_metabolites, ]
 #sample_subset <- meta_data %>% filter(Injury != "Uninjured") %>% rownames()
 #sig_data <- data.norm[sig_metabolites, sample_subset]
