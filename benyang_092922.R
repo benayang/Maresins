@@ -222,136 +222,94 @@ pheatmap(all.plot,
 dev.off()
 
 #####################################################################################
-# Export DE data for DPGP
+# Export DE and all data for DPGP
 #####################################################################################
 
+export_data_for_dpgp <- function(data, meta_data, prefix) {
+  # average by condition
+  data_avg <- data.frame(d0_left = rowMeans(data[,meta_data %>% filter(Time == "Day 0" & Leg == "Left") %>% rownames()]),
+                            d0_right = rowMeans(data[,meta_data %>% filter(Time == "Day 0" & Leg == "Right") %>% rownames()]),
+                            d3_1mm = rowMeans(data[,meta_data %>% filter(Condition == "Day 3_1 mm") %>% rownames()]),
+                            d3_2mm = rowMeans(data[,meta_data %>% filter(Condition == "Day 3_2 mm") %>% rownames()]),
+                            d7_1mm = rowMeans(data[,meta_data %>% filter(Condition == "Day 7_1 mm") %>% rownames()]),
+                            d7_2mm = rowMeans(data[,meta_data %>% filter(Condition == "Day 7_2 mm") %>% rownames()]),
+                            d14_1mm = rowMeans(data[,meta_data %>% filter(Condition == "Day 14_1 mm") %>% rownames()]),
+                            d14_2mm = rowMeans(data[,meta_data %>% filter(Condition == "Day 14_2 mm") %>% rownames()]))
+  # calculate fold changes
+  data_fc <- data.frame(d0_fc = data_avg$d0_right / data_avg$d0_left,
+                      d3_fc = data_avg$d3_2mm / data_avg$d3_1mm,
+                      d7_fc = data_avg$d7_2mm / data_avg$d7_1mm,
+                      d14_fc = data_avg$d14_2mm / data_avg$d14_1mm,
+                      row.names = rownames(data_avg))
+  # find z-scores of fold changes
+  data_fc_zscore <- t(scale(t(data_fc), center=T, scale=T))
+  # write tables
+  write.table(data_avg, file.path(projdir, "Tables", sprintf("%s_avg.tsv",prefix)), sep='\t', row.names=T, col.names=T, quote=F)
+  write.table(data_fc, file.path(projdir, "Tables", sprintf("%s_fc.tsv",prefix)), sep='\t', row.names=T, col.names=T, quote=F)
+  write.table(data_fc_zscore, file.path(projdir, "Tables", sprintf("%s_fc_zscore.tsv",prefix)), sep='\t', row.names=T, col.names=T, quote=F)
+  # return lists
+  return(list(data_avg = data_avg, data_fc = data_fc, data_fc_zscore = data_fc_zscore))
+}
+
 sig_metabolites <- data.stats %>% filter(pval.injury < 0.05) %>% pull(Lipid)
-sample_subset <- meta_data %>% filter(Injury != "Uninjured") %>% rownames()
-sig_data <- data.norm[sig_metabolites, sample_subset]
+sig_data <- data.norm[sig_metabolites, ]
+#sample_subset <- meta_data %>% filter(Injury != "Uninjured") %>% rownames()
+#sig_data <- data.norm[sig_metabolites, sample_subset]
+sig_data <- export_data_for_dpgp(data = data.norm[sig_metabolites, ],
+                                meta_data = as.data.frame(colData(met)),
+                                prefix = "sig_data")
 
-# average by condition
-sig_data_avg <- data.frame(d3_1mm = rowMeans(sig_data[,meta_data %>% filter(Condition == "Day 3_1 mm") %>% rownames()]),
-                                d3_2mm = rowMeans(sig_data[,meta_data %>% filter(Condition == "Day 3_2 mm") %>% rownames()]),
-                                d7_1mm = rowMeans(sig_data[,meta_data %>% filter(Condition == "Day 7_1 mm") %>% rownames()]),
-                                d7_2mm = rowMeans(sig_data[,meta_data %>% filter(Condition == "Day 7_2 mm") %>% rownames()]),
-                                d14_1mm = rowMeans(sig_data[,meta_data %>% filter(Condition == "Day 14_1 mm") %>% rownames()]),
-                                d14_2mm = rowMeans(sig_data[,meta_data %>% filter(Condition == "Day 14_2 mm") %>% rownames()]))
+all_data <- export_data_for_dpgp(data = data.norm,
+                                meta_data = as.data.frame(colData(met)),
+                                prefix = "all_data")
 
-sig_fc <- data.frame(d3_fc = sig_data_avg$d3_2mm / sig_data_avg$d3_1mm,
-                    d7_fc = sig_data_avg$d7_2mm / sig_data_avg$d7_1mm,
-                    d14_fc = sig_data_avg$d14_2mm / sig_data_avg$d14_1mm,
-                    row.names = rownames(sig_data_avg))
-
-sig_fc_zscore <- t(scale(t(sig_fc), center=T, scale=T))
-
-write.table(sig_data_avg, file.path(projdir, "Tables", "sig_data_avg.tsv"), sep='\t', row.names=T, col.names=T, quote=F)
-write.table(sig_fc, file.path(projdir, "Tables", "sig_fc.tsv"), sep='\t', row.names=T, col.names=T, quote=F)
-write.table(sig_fc_zscore, file.path(projdir, "Tables", "sig_fc_zscore.tsv"), sep='\t', row.names=T, col.names=T, quote=F)
+saveRDS(sig_data, file.path(projdir,"sig_data_for_dpgp.RDS"))
+saveRDS(all_data, file.path(projdir,"all_data_for_dpgp.RDS"))
 
 #####################################################################################
 # Mean and standard deviation of DE lipids
 #####################################################################################
 
-dpgp_clusters <- read.table(file.path(projdir, "DPGP_within_timepoint", "sig_within_timepoint_optimal_clustering.txt"), sep='\t', header=T)
-
-dpgp_clusters_plot_df <- sig_fc_zscore[dpgp_clusters$gene, ] %>% 
+make_DPGP_plot <- function(data, dpgp_clusters) {
+  dpgp_clusters_plot_df <- data[dpgp_clusters$gene, ] %>% 
     tibble::rownames_to_column("gene") %>% 
     pivot_longer(cols = !gene, names_to="day", values_to="zscore") %>%
     left_join(dpgp_clusters, by="gene") %>%
     group_by(cluster, day) %>%
     summarise(mean = mean(zscore), sd = sd(zscore)) %>%
     mutate(ymin = mean - 2*sd, ymax = mean + 2*sd)
-dpgp_clusters_plot_df$day <- factor(dpgp_clusters_plot_df$day, levels=c("d3_fc","d7_fc","d14_fc"))
-levels(dpgp_clusters_plot_df$day) <- c("d3_fc"="d3", "d7_fc"="d7", "d14_fc"="d14")
-dpgp_clusters_plot_df$cluster <- factor(dpgp_clusters_plot_df$cluster)
+  dpgp_clusters_plot_df$day <- factor(dpgp_clusters_plot_df$day, levels=c("d0_fc","d3_fc","d7_fc","d14_fc"))
+  levels(dpgp_clusters_plot_df$day) <- c("d0_fc"="d0", "d3_fc"="d3", "d7_fc"="d7", "d14_fc"="d14")
+  dpgp_clusters_plot_df$cluster <- factor(dpgp_clusters_plot_df$cluster)
 
-p = ggplot(data=dpgp_clusters_plot_df, aes(x=day)) + 
-  geom_ribbon(aes(ymin=ymin, ymax=ymax, group=cluster), fill="gray") +
-  geom_line(aes(y=mean, group=cluster), size=1) +
-  geom_point(aes(y=mean, color=cluster), size=5, stroke=0) + 
-  geom_hline(yintercept=0, lty=2) +
-  scale_color_brewer(palette="Paired") +
-  theme_bw() +
-  labs(x = "Day", y = "Fold-change z-score (2mm vs 1mm)")
+  p = ggplot(data=dpgp_clusters_plot_df, aes(x=day)) + 
+    geom_hline(yintercept=0, lty=2) +
+    geom_ribbon(aes(ymin=ymin, ymax=ymax, group=cluster), fill="gray", alpha=0.6) +
+    geom_line(aes(y=mean, group=cluster), size=1) +
+    geom_point(aes(y=mean, color=cluster), size=5, stroke=0) + 
+    scale_color_brewer(palette="Paired") +
+    theme_bw() +
+    labs(x = "Day", y = "Fold-change z-score")
+  
+  panel_labs <- paste0("Cluster ",unique(dpgp_clusters$cluster), ", N=", table(dpgp_clusters$cluster))
+  names(panel_labs) <- unique(dpgp_clusters$cluster)
 
-panel_labs <- paste0("Cluster ",unique(dpgp_clusters$cluster), ", N=", table(dpgp_clusters$cluster))
-names(panel_labs) <- unique(dpgp_clusters$cluster)
+  p <- p + facet_wrap(~cluster, labeller=as_labeller(panel_labs)) +
+      theme(legend.position = "none",
+          text = element_text(family="Arial"),
+          panel.grid.major = element_blank(), 
+          panel.grid.minor = element_blank(),
+          strip.background = element_rect(color="black", fill="gray95"),
+          strip.text = element_text(size = 12, face="bold"),
+          axis.text = element_text(face="bold", color="black", size=12),
+          axis.title = element_text(face="bold", color="black", size=12))
+  return(p)
+}
 
-p <- p + facet_wrap(~cluster, labeller=as_labeller(panel_labs)) +
-    theme(legend.position = "none",
-        text = element_text(family="Arial"),
-        panel.grid.major = element_blank(), 
-        panel.grid.minor = element_blank(),
-        strip.background = element_rect(color="black", fill="gray95"),
-        strip.text = element_text(size = 12, face="bold"),
-        axis.text = element_text(face="bold", color="black", size=12),
-        axis.title = element_text(face="bold", color="black", size=12))
-ggsave(plot=p, filename = file.path(projdir,"DPGP_within_timepoint","DE_cluster_trajectory.png"), dpi=300, width=6, height=6)
+sig_dpgp_clusters <- read.table(file.path(projdir, "DPGP_within_timepoint", "sig_within_timepoint_optimal_clustering.txt"), sep='\t', header=T)
+sig_DPGP_plt <- make_DPGP_plot(as.data.frame(sig_data$data_fc_zscore), sig_dpgp_clusters)
+ggsave(plot=sig_DPGP_plt, filename = file.path(projdir,"Plots","DE_cluster_trajectory.png"), dpi=300, width=6, height=6)
 
-#####################################################################################
-# Export all data for DPGP
-#####################################################################################
-
-sample_subset <- meta_data %>% filter(Injury != "Uninjured") %>% rownames()
-all_data <- data.norm[,sample_subset]
-
-# average by condition
-all_data_avg <- data.frame(d3_1mm = rowMeans(all_data[,meta_data %>% filter(Condition == "Day 3_1 mm") %>% rownames()]),
-                                d3_2mm = rowMeans(all_data[,meta_data %>% filter(Condition == "Day 3_2 mm") %>% rownames()]),
-                                d7_1mm = rowMeans(all_data[,meta_data %>% filter(Condition == "Day 7_1 mm") %>% rownames()]),
-                                d7_2mm = rowMeans(all_data[,meta_data %>% filter(Condition == "Day 7_2 mm") %>% rownames()]),
-                                d14_1mm = rowMeans(all_data[,meta_data %>% filter(Condition == "Day 14_1 mm") %>% rownames()]),
-                                d14_2mm = rowMeans(all_data[,meta_data %>% filter(Condition == "Day 14_2 mm") %>% rownames()]))
-
-all_fc <- data.frame(d3_fc = all_data_avg$d3_2mm / all_data_avg$d3_1mm,
-                    d7_fc = all_data_avg$d7_2mm / all_data_avg$d7_1mm,
-                    d14_fc = all_data_avg$d14_2mm / all_data_avg$d14_1mm,
-                    row.names = rownames(all_data_avg))
-
-all_fc_zscore <- t(scale(t(all_fc), center=T, scale=T))
-
-write.table(all_data_avg, file.path(projdir, "Tables", "all_data_avg.tsv"), sep='\t', row.names=T, col.names=T, quote=F)
-write.table(all_fc, file.path(projdir, "Tables", "all_fc.tsv"), sep='\t', row.names=T, col.names=T, quote=F)
-write.table(all_fc_zscore, file.path(projdir, "Tables", "all_fc_zscore.tsv"), sep='\t', row.names=T, col.names=T, quote=F)
-
-
-#####################################################################################
-# Mean and standard deviation of all lipids
-#####################################################################################
-
-dpgp_clusters <- read.table(file.path(projdir, "DPGP_within_timepoint", "all_within_timepoint_optimal_clustering.txt"), sep='\t', header=T)
-
-dpgp_clusters_plot_df <- all_fc_zscore[dpgp_clusters$gene, ] %>% 
-    as.data.frame() %>%
-    tibble::rownames_to_column("gene") %>% 
-    pivot_longer(cols = !gene, names_to="day", values_to="zscore") %>%
-    left_join(dpgp_clusters, by="gene") %>%
-    group_by(cluster, day) %>%
-    summarise(mean = mean(zscore), sd = sd(zscore)) %>%
-    mutate(ymin = mean - 2*sd, ymax = mean + 2*sd)
-dpgp_clusters_plot_df$day <- factor(dpgp_clusters_plot_df$day, levels=c("d3_fc","d7_fc","d14_fc"))
-levels(dpgp_clusters_plot_df$day) <- c("d3_fc"="d3", "d7_fc"="d7", "d14_fc"="d14")
-dpgp_clusters_plot_df$cluster <- factor(dpgp_clusters_plot_df$cluster)
-
-p = ggplot(data=dpgp_clusters_plot_df, aes(x=day)) + 
-  geom_ribbon(aes(ymin=ymin, ymax=ymax, group=cluster), fill="gray") +
-  geom_line(aes(y=mean, group=cluster), size=1) +
-  geom_point(aes(y=mean, color=cluster), size=5, stroke=0) + 
-  geom_hline(yintercept=0, lty=2) +
-  scale_color_brewer(palette="Paired") +
-  theme_bw() +
-  labs(x = "Day", y = "Fold-change z-score (2mm vs 1mm)")
-
-panel_labs <- paste0("Cluster ",unique(dpgp_clusters$cluster), ", N=", table(dpgp_clusters$cluster))
-names(panel_labs) <- unique(dpgp_clusters$cluster)
-
-p <- p + facet_wrap(~cluster, labeller=as_labeller(panel_labs)) +
-    theme(legend.position = "none",
-        text = element_text(family="Arial"),
-        panel.grid.major = element_blank(), 
-        panel.grid.minor = element_blank(),
-        strip.background = element_rect(color="black", fill="gray95"),
-        strip.text = element_text(size = 12, face="bold"),
-        axis.text = element_text(face="bold", color="black", size=12),
-        axis.title = element_text(face="bold", color="black", size=12))
-ggsave(plot=p, filename = file.path(projdir,"DPGP_within_timepoint","all_cluster_trajectory.png"), dpi=300, width=6, height=6)
+all_dpgp_clusters <- read.table(file.path(projdir, "DPGP_within_timepoint", "all_within_timepoint_optimal_clustering.txt"), sep='\t', header=T)
+all_DPGP_plt <- make_DPGP_plot(as.data.frame(all_data$data_fc_zscore), all_dpgp_clusters)
+ggsave(plot=all_DPGP_plt, filename = file.path(projdir,"Plots","all_cluster_trajectory.png"), dpi=300, width=6, height=6)
