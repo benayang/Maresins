@@ -9,6 +9,8 @@ library(reshape2)
 library(ggpubr)
 library(gplots)
 library(ggrepel)
+library(rstatix)
+library(ComplexHeatmap)
 
 projdir <- "/nas/homes/benyang/Maresins"
 
@@ -25,22 +27,17 @@ Day14 = col_vector[3]
 sample_data <- read_excel(file.path(projdir,"20210818JCAMeicosanomics - pg per mg.xlsx"), 
                           sheet = 'pg per mg', skip = 1, col_names = TRUE) %>% as.data.frame()
 metabolites <- sample_data[,1]
-#colnames(sample_data) <- sample_data[1,]
 sample_data <- sample_data[,-1]
 assay <- data.frame(lapply(sample_data,as.numeric))
 rownames(assay) <- metabolites
 assay[1:5,1:5]
 
 meta_data <- read_excel(file.path(projdir, "TA VML injury_LC-MS_08-13-21 extract JAL.xlsx"), sheet = 1, skip = 3) %>% as.data.frame()
-#colnames(meta_data) <- meta_data[3,]
-#meta_data <- meta_data[-c(1:3),]
 meta_data$`Code/mouse#` <- as.numeric(meta_data$`Code/mouse#`)
 rownames(meta_data) <- meta_data$`LC-MS/MS code`
-meta_data$Condition <- NA
-for (i in 1:length(meta_data$Condition)) {
-  meta_data$Condition[i] <- sprintf("%s_%s",meta_data$Time[i],meta_data$Injury[i])
-}
-head(meta_data)
+meta_data <- mutate(meta_data, Condition = paste(Time, Injury, sep="_"))
+meta_data$Time <- factor(meta_data$Time, levels=stringr::str_sort(unique(meta_data$Time), numeric=T))
+meta_data$Leg <- factor(recode(meta_data$Leg, right = "Right", rght = "Right"))
 
 rowData <- rownames(assay) %>% as.data.frame()
 colnames(rowData) <- "BIOCHEMICAL"
@@ -49,28 +46,14 @@ rowData$SUPER_PATHWAY <- rep("Lipid",length(rowData))
 met <- create_mae(assay,rowData,meta_data)
 
 # Impute missing data
+png(file.path(projdir,"Plots","na_heatmap.png"), res=300, units='in', width=6, height=6)
 na_heatmap(met, group_factor="Condition", label_colors=col_vector[1:7])
-met <- knn_impute(met,cutoff=0.4) # use knn to impute missing values as long as metabolite is expressed in >60% of samples
-met <- normalize_met(met) # variance stabilizing normalization
-met
-
-met <- met %>%
-    diss_matrix %>%
-    identify_modules(min_module_size=5) %>%
-    name_modules(pathway_annotation="SUB_PATHWAY") %>%
-    calculate_MS(group_factors=c("Time","Injury"))
-
-MS_plot(met,
-        group_factor="Condition",
-        p_value_cutoff=0.05,
-        p_adjust=FALSE)
-
-# saveRDS(met, file.path(projdir,"lipids_met_obj.RDS"))
-
-# QC Plot
-png(file.path(projdir,"Plots","Quality_Plot.png"), res = 300, height = 6, width = 8, units = "in")
-quality_plot(met, group_factor="Condition",label_colors=col_vector[1:8])
 dev.off()
+
+met <- knn_impute(met,cutoff=0.4) # use knn to impute missing values as long as metabolite is expressed in >60% of samples
+# [1] raw: SummarizedExperiment with 143 rows and 40 columns
+# [2] imputed: SummarizedExperiment with 79 rows and 40 columns
+# 64 lipids removed since present in <40% of samples
 
 # Remove samples 25 and 19
 png(file.path(projdir,"Plots","Outlier_Heatmap.png"), res = 300, height = 6, width = 8, units = "in")
@@ -79,165 +62,101 @@ outlier_heatmap(met, group_factor="Condition",
                 k=7)
 dev.off()
 
-
 #####################################################################################
 # Create Data Frame for statistical analysis and plotting
 #####################################################################################
 data <- assays(met)
-data.norm <- data$norm_imputed
-#data.norm <- data.norm[,-c(19,25)]
-data.raw <- data$imputed
-#data.raw <- data.raw[,-c(19,25)]
-data.df <- melt(data.raw)
-colnames(data.df) <- c('Lipid', 'Sample', 'Concentration')
-#data.df$Time <- c(rep('Day 0',790), rep('Day 3', 79*9), rep('Day 7', 79*9), rep('Day 14', 790)) %>% as.factor() #if removing samples 19 and 25
-data.df$Time <- c(rep('Day 0',790), rep('Day 3', 790), rep('Day 7', 790), rep('Day 14', 790)) %>% as.factor()
-#data.df$Injury <- c(rep('Uninjured',790), rep('1mm', 79*5), rep('2mm',79*4), rep('1mm', 79*4), rep('2mm',79*5), rep('1mm', 79*5), rep('2mm',79*5)) %>% as.factor() #if removing samples 19, 25
-data.df$Injury <- c(rep('Uninjured',790), rep('1mm', 79*5), rep('2mm',79*5), rep('1mm', 79*5), rep('2mm',79*5), rep('1mm', 79*5), rep('2mm',79*5)) %>% as.factor()
-data.df$Condition <- NA
-for (i in 1:length(data.df$Condition)) {
-  data.df$Condition[i] <- sprintf("%s_%s",data.df$Time[i],data.df$Injury[i])
-}
-data.df$Condition <- as.factor(data.df$Condition)
+data.imputed <- data$imputed
+data.df <- data.imputed %>% 
+              as.data.frame() %>%
+              tibble::rownames_to_column("Lipid") %>%
+              pivot_longer(cols=!Lipid, names_to="Sample", values_to="Concentration") %>%
+              left_join(meta_data %>% tibble::rownames_to_column("Sample"), by="Sample") %>%
+              mutate_if(is.character, as.factor)
 
 table(data.df$Injury, data.df$Time)
-data.df %>%
-    mutate(log10conc = log10(Concentration)) %>%
-    ggboxplot(x = "Time", y = "log10conc", color = "Injury", 
-          palette = c("#00AFBB", "#E7B800", "grey50"))
-ggsave(file.path(projdir,"Plots","log10concentration.png"), dpi = 300, height = 6, width = 8)
 
-source("http://peterhaschke.com/Code/multiplot.R")
-pca_plot(met, group_factor="Condition", label_colors=brewer.pal(name="Paired", n=7))
-ggsave(file.path(projdir, "Plots", "condition_pca.png"), dpi=300, width=6, height=5)
-# multiplot(
-# pca_plot(met,
-#          group_factor="Condition"),
-# tsne_plot(met,
-#           group_factor="Condition",
-#              label_colors=c("darkseagreen","dodgerblue")),
-# cols=2)
+# source("http://peterhaschke.com/Code/multiplot.R")
+# pca_plot(met, group_factor="Condition", label_colors=brewer.pal(name="Paired", n=12))
+# ggsave(file.path(projdir, "Plots", "condition_pca.png"), dpi=300, width=6, height=5)
+
+# png(file.path(projdir, "Plots", "condition_and_sample_pca.png"), res=300, units="in", width=6, height=10)
+# multiplot(pca_plot(met, group_factor="Condition", label_colors=brewer.pal(name="Paired", n=12)),
+#           pca_plot(met, group_factor="LC-MS/MS code", 
+#                   label_colors=col_vector[seq_along(as.data.frame(colData(met))$Condition)]))
+# dev.off()
 
 #####################################################################################
-# Heatmap of top 25 DE analytes
+# PCA on all data without removing outliers
 #####################################################################################
-data.stats <- data.frame()
-for (lipid in levels(data.df$Lipid)) {
-  res.aov2 <- aov(Concentration ~ Injury + Time, data = data.df[data.df$Lipid == lipid,])
-  summary(res.aov2)
-  de <- data.frame("Lipid" = lipid, "pval.time" = summary(res.aov2)[[1]][["Pr(>F)"]][2], "pval.injury" = summary(res.aov2)[[1]][["Pr(>F)"]][1])
-  data.stats <- rbind(data.stats, de)
-}
 
-top.25 <- data.stats %>% top_n(n = -25, wt = pval.injury)
-to.plot <- data.raw[top.25$Lipid,]
+all_pca <- prcomp(t(data.imputed), scale=T)
+summary(all_pca)
+var_explained <- all_pca$sdev^2/sum(all_pca$sdev^2)
+png(file.path(projdir,"Plots","raw_imputed_PCA_var_prop.png"), res=300, units='in', width=6, height=4)
+barplot(var_explained[1:15], names.arg=1:15, xlab="PCs", ylab="Proportion of Variance")
+dev.off()
+
+pca_plt_data <- all_pca$x %>% 
+  as.data.frame %>%
+  rownames_to_column("Sample") %>%
+  mutate(i = stringr::str_order(Sample, numeric = T)) %>%
+  arrange(i) %>%
+  mutate(Sample = factor(Sample, levels=Sample)) %>%
+  left_join(meta_data %>% select(Condition, Leg, `LC-MS/MS code`), by=c("Sample"="LC-MS/MS code")) %>%
+  group_by(Condition, Leg) %>%
+  mutate(Rep = factor(seq_len(n()))) %>%
+  ungroup() %>%
+  mutate(Condition = factor(Condition, levels=unique(Condition)))
+
+png(file.path(projdir,"Plots","raw_imputed_PCA_PC12.png"), res=300, units='in', width=6, height=6)
+ggplot(pca_plt_data, aes(x=PC1,y=PC2)) + 
+  geom_point(aes(color=Condition, shape=Rep), size=4) +
+  #scale_color_manual(values = col_vector) +
+  ggsci::scale_color_jco() +
+  theme_bw() + coord_equal() +
+  labs(x=paste0("PC1: ",round(var_explained[1]*100,1),"%"),
+       y=paste0("PC2: ",round(var_explained[2]*100,1),"%")) +
+  theme(text = element_text(size=12, color="black"))
+dev.off()
+
+png(file.path(projdir,"Plots","raw_imputed_PCA_PC23.png"), res=300, units='in', width=6, height=6)
+ggplot(pca_plt_data, aes(x=PC2,y=PC3)) + 
+  geom_point(aes(color=Condition, shape=Rep), size=4) +
+  #scale_color_manual(values = col_vector) +
+  ggsci::scale_color_jco() +
+  theme_bw() + coord_equal() +
+  labs(x=paste0("PC2: ",round(var_explained[2]*100,1),"%"),
+       y=paste0("PC3: ",round(var_explained[3]*100,1),"%")) +
+  theme(text = element_text(size=12, color="black"))
+dev.off()
+
+
+#####################################################################################
+# Heatmap for all lipids and samples
+#####################################################################################
+
 #to.plot <- to.plot[,c(1:15,20:23,29:33,16:19,24:28,34:38)] # reorder columns, if removing samples
-to.plot <- to.plot[,c(1:15,21:25,31:35,16:20,26:30,36:40)] # reorder columns
+hmp_sample_order <- colData(met) %>%
+  as.data.frame() %>%
+  mutate(Injury = factor(Injury, levels=c("Uninjured","1 mm", "2 mm")), 
+        Time = factor(Time, levels=stringr::str_sort(unique(Time), numeric=T))) %>% 
+  arrange(Injury, Time) %>%
+  rownames()
 
-
-# Time Series Heatmap of top 25-50 DEGs (z-score)
-# annotation.df <- data.frame(Time = factor(c(rep('Day 0',10), 
-#                                             rep('Day 3', 5), 
-#                                             rep('Day 7', 4), 
-#                                             rep('Day 14', 5), 
-#                                             rep('Day 3', 4), 
-#                                             rep('Day 7', 5), 
-#                                             rep('Day 14', 5))),
-#                             Injury = factor(c(rep('Uninjured',10), 
-#                                               rep('1mm', 14), 
-#                                               rep('2mm', 14))))
-# annotation.df <- data.frame(Time = factor(c(rep('Day 0',10), 
-#                                             rep('Day 3', 5), 
-#                                             rep('Day 7', 5), 
-#                                             rep('Day 14', 5), 
-#                                             rep('Day 3', 5), 
-#                                             rep('Day 7', 5), 
-#                                             rep('Day 14', 5))),
-#                             Injury = factor(c(rep('Uninjured',10), 
-#                                               rep('1mm', 15), 
-#                                               rep('2mm', 15))))
-# rownames(annotation.df) <- colnames(to.plot)
-mat_breaks <- seq(-2, 2, length.out = 100)
-
-# Specify colors
-# ann_colors = list(
-#   Time = c("Day 0" = "grey60", 
-#            "Day 3" = col_vector[1], 
-#            "Day 7" = col_vector[2], 
-#            "Day 14" = col_vector[3]),
-#   Injury = c("Uninjured" = col_vector[5], 
-#              "1mm" = col_vector[6], 
-#              "2mm" = col_vector[7])
-# )
 ann_colors <- list(
   Time = c("grey60", col_vector[1:3]),
   Injury = col_vector[5:7],
-  Leg = col_vector[8:11]
+  Leg = col_vector[8:9]
 )
 names(ann_colors$Time) <- unique(as.data.frame(colData(met))$Time)
 names(ann_colors$Injury) <- unique(as.data.frame(colData(met))$Injury)
 names(ann_colors$Leg) <- unique(as.data.frame(colData(met))$Leg)
 
-png(file.path(projdir,"Plots","Heatmap_Top25_DELipids.png"), height = 10, width = 10, res = 300, units = 'in')
-pheatmap(to.plot,
-  color = colorRampPalette(rev(brewer.pal(n = 11, name = "RdBu")))(250),
-  annotation_col = as.data.frame(colData(met))[,c("Time","Injury","Leg")],
-  annotation_colors = ann_colors,
-  annotation_legend = TRUE,
-  border_color = NA,
-  #breaks = mat_breaks,
-  scale = "row",
-  cluster_rows = TRUE,
-  cluster_cols = FALSE,
-  clustering_distance_rows = "euclidean",
-  clustering_method = "complete",
-  legend = TRUE,
-  show_rownames = T,
-  show_colnames = T,
-  main = "Top 25 DE Lipids",
-  fontsize = 10,
-  angle_col = "90",
-  gaps_col = c(10,25)
-)
-dev.off()
+mat_breaks <- seq(-2, 2, length.out = 100)
 
-#####################################################################################
-# Heatmap for all DE lipids
-#####################################################################################
-
-sig_metabolites <- data.stats %>% filter(pval.injury < 0.05) %>% pull(Lipid)
-
-#to.plot <- to.plot[,c(1:15,20:23,29:33,16:19,24:28,34:38)] # reorder columns, if removing samples
-all.de.plot <- data.raw[sig_metabolites,c(1:15,21:25,31:35,16:20,26:30,36:40)] # reorder columns
-png(file.path(projdir,"Plots","Heatmap_all_DELipids.png"), height = 12, width = 10, res = 300, units = 'in')
-pheatmap(all.de.plot,
-  color = colorRampPalette(rev(brewer.pal(n = 11, name = "RdBu")))(250),
-  annotation_col = as.data.frame(colData(met))[,c("Time","Injury","Leg")],
-  annotation_colors = ann_colors,
-  annotation_legend = TRUE,
-  border_color = NA,
-  #breaks = mat_breaks,
-  scale = "row",
-  cluster_rows = TRUE,
-  cluster_cols = FALSE,
-  clustering_distance_rows = "euclidean",
-  clustering_method = "complete",
-  legend = TRUE,
-  show_rownames = T,
-  show_colnames = T,
-  main = "All DE Lipids",
-  fontsize = 10,
-  angle_col = "90",
-  gaps_col = c(10,25)
-)
-dev.off()
-
-#####################################################################################
-# Heatmap for all lipids
-#####################################################################################
-
-#to.plot <- to.plot[,c(1:15,20:23,29:33,16:19,24:28,34:38)] # reorder columns, if removing samples
-all.plot <- data.raw[,c(1:15,21:25,31:35,16:20,26:30,36:40)] # reorder columns
+#all.plot <- data.imputed[,c(1:15,21:25,31:35,16:20,26:30,36:40)] # reorder columns
+all.plot <- data.imputed[,hmp_sample_order]
 png(file.path(projdir,"Plots","Heatmap_all_Lipids.png"), height = 12, width = 10, res = 300, units = 'in')
 pheatmap(all.plot,
   color = colorRampPalette(rev(brewer.pal(n = 11, name = "RdBu")))(250),
@@ -260,6 +179,303 @@ pheatmap(all.plot,
   gaps_col = c(10,25)
 )
 dev.off()
+
+#####################################################################################
+# Distance matrix
+#####################################################################################
+
+sampleDists <- dist(t(assays(met)$imputed))
+sampleDistMatrix <- as.matrix(sampleDists)
+png(file.path(projdir,"Plots","Heatmap_all_Lipids_distance.png"), height = 12, width = 12, res = 300, units = 'in')
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows=sampleDists,
+         clustering_distance_cols=sampleDists,
+         color = colorRampPalette(rev(brewer.pal(n = 11, name = "RdBu")))(250),
+          annotation_col = as.data.frame(colData(met))[,c("Time","Injury","Leg")],
+          annotation_colors = ann_colors,
+          annotation_legend = TRUE,
+          border_color = NA,
+          show_rownames = T,
+          show_colnames = T,
+          main = "All Lipids Distance Matrix",
+          fontsize = 10,
+          angle_col = "90")
+dev.off()
+
+#####################################################################################
+# Drop outliers
+#####################################################################################
+
+outlier_samples <- c("JACM.1","JACM.19","JACM.25","JACM.28","JACM.38")
+
+filt.met <- create_mae(assay = assay[,setdiff(colnames(assay), outlier_samples)],
+                      rowData = rowData,
+                      colData = meta_data[setdiff(rownames(meta_data), outlier_samples),])
+filt.met <- knn_impute(filt.met,cutoff=0.4) # use knn to impute missing values as long as metabolite is expressed in >60% of samples
+
+filt.data <- assays(filt.met)
+filt.data.imputed <- filt.data$imputed
+filt.data.df <- filt.data.imputed %>% 
+              as.data.frame() %>%
+              tibble::rownames_to_column("Lipid") %>%
+              pivot_longer(cols=!Lipid, names_to="Sample", values_to="Concentration") %>%
+              left_join(meta_data %>% tibble::rownames_to_column("Sample"), by="Sample") %>%
+              mutate_if(is.character, as.factor)
+
+#####################################################################################
+# Check PCA after cleaning data
+#####################################################################################
+
+filt_pca <- prcomp(t(filt.data.imputed), scale=T)
+summary(filt_pca)
+var_explained <- filt_pca$sdev^2/sum(filt_pca$sdev^2)
+png(file.path(projdir,"Plots","filt_imputed_PCA_var_prop.png"), res=300, units='in', width=6, height=4)
+barplot(var_explained[1:15], names.arg=1:15, xlab="PCs", ylab="Proportion of Variance")
+dev.off()
+
+filt_pca_plt_data <- filt_pca$x %>% 
+  as.data.frame %>%
+  rownames_to_column("Sample") %>%
+  mutate(i = stringr::str_order(Sample, numeric = T)) %>%
+  arrange(i) %>%
+  mutate(Sample = factor(Sample, levels=Sample)) %>%
+  left_join(meta_data %>% select(Condition, Leg, `LC-MS/MS code`), by=c("Sample"="LC-MS/MS code")) %>%
+  group_by(Condition, Leg) %>%
+  mutate(Rep = factor(seq_len(n()))) %>%
+  ungroup() %>%
+  mutate(Condition = factor(Condition, levels=unique(Condition)))
+
+png(file.path(projdir,"Plots","filt_imputed_PCA_PC12.png"), res=300, units='in', width=6, height=6)
+ggplot(filt_pca_plt_data, aes(x=PC1,y=PC2)) + 
+  geom_point(aes(color=Condition, shape=Rep), size=4) +
+  #scale_color_manual(values = col_vector) +
+  ggsci::scale_color_jco() +
+  theme_bw() + coord_equal() +
+  labs(x=paste0("PC1: ",round(var_explained[1]*100,1),"%"),
+       y=paste0("PC2: ",round(var_explained[2]*100,1),"%")) +
+  theme(text = element_text(size=12, color="black"))
+dev.off()
+
+png(file.path(projdir,"Plots","filt_imputed_PCA_PC23.png"), res=300, units='in', width=6, height=6)
+ggplot(filt_pca_plt_data, aes(x=PC2,y=PC3)) + 
+  geom_point(aes(color=Condition, shape=Rep), size=4) +
+  #scale_color_manual(values = col_vector) +
+  ggsci::scale_color_jco() +
+  theme_bw() + coord_equal() +
+  labs(x=paste0("PC2: ",round(var_explained[2]*100,1),"%"),
+       y=paste0("PC3: ",round(var_explained[3]*100,1),"%")) +
+  theme(text = element_text(size=12, color="black"))
+dev.off()
+
+#####################################################################################
+# Heatmap for all lipids and samples after removing outliers
+#####################################################################################
+
+gaps_col_idx <- colData(filt.met) %>%
+  as.data.frame() %>%
+  rownames_to_column("Sample") %>%
+  group_by(Injury) %>% 
+  summarise(first_value = first(Sample),
+            last_value = last(Sample)) %>% 
+  mutate(last_idx = na.omit(match(last_value, rownames(as.data.frame(colData(filt.met))))),
+        first_idx = na.omit(match(first_value, rownames(as.data.frame(colData(filt.met)))))) 
+
+hmp_sample_order <- colData(filt.met) %>%
+  as.data.frame() %>%
+  mutate(Injury = factor(Injury, levels=c("Uninjured","1 mm", "2 mm")), 
+        Time = factor(Time, levels=stringr::str_sort(unique(Time), numeric=T))) %>% 
+  arrange(Injury, Time) %>%
+  rownames()
+
+filt.plot <- filt.data.imputed[,hmp_sample_order]
+png(file.path(projdir,"Plots","Heatmap_all_Lipids_filtered.png"), height = 12, width = 10, res = 300, units = 'in')
+pheatmap(filt.plot,
+  color = colorRampPalette(rev(brewer.pal(n = 11, name = "RdBu")))(250),
+  annotation_col = as.data.frame(colData(filt.met))[,c("Time","Injury","Leg")],
+  annotation_colors = ann_colors,
+  annotation_legend = TRUE,
+  border_color = NA,
+  #breaks = mat_breaks,
+  scale = "row",
+  cluster_rows = TRUE,
+  cluster_cols = FALSE,
+  clustering_distance_rows = "euclidean",
+  clustering_method = "complete",
+  legend = TRUE,
+  show_rownames = T,
+  show_colnames = T,
+  main = "All Lipids (outliers removed)",
+  fontsize = 10,
+  angle_col = "90",
+  gaps_col = c(9,23)
+)
+dev.off()
+
+#####################################################################################
+# Normalize filtered object
+#####################################################################################
+
+filt.met <- normalize_met(filt.met) # variance stabilizing normalization
+filt.met
+
+# saveRDS(filt.met, file.path(projdir,"lipids_met_filt_obj.RDS"))
+
+filt.data.df <- assays(filt.met)$norm_imputed %>% 
+              as.data.frame() %>%
+              tibble::rownames_to_column("Lipid") %>%
+              pivot_longer(cols=!Lipid, names_to="Sample", values_to="Concentration") %>%
+              left_join(meta_data %>% tibble::rownames_to_column("Sample"), by="Sample") %>%
+              mutate_if(is.character, as.factor)
+
+# QC Plot
+png(file.path(projdir,"Plots","filtered_Quality_Plot.png"), res = 300, height = 6, width = 8, units = "in")
+quality_plot(filt.met, group_factor="Condition",label_colors=col_vector[1:8])
+dev.off()
+
+# filt.data.df.test <- filt.data.df %>% mutate(log10conc = log10(Concentration)) %>% group_by(Time) %>% t_test(log10conc ~ Leg)
+# filt.data.df.test <- add_xy_position(filt.data.df.test, x="Time", fun="mean_se")
+
+# filt_conc_plt <- filt.data.df %>%
+#     ggplot(aes(x=Time, y=log10(Concentration))) +
+#     stat_summary(aes(color = Leg), fun.data="mean_se", geom="pointrange") +
+#     stat_summary(aes(color = Leg), fun.data="mean_se", geom="point") + 
+#     stat_summary(aes(color = Leg, group = Leg), fun="mean", geom="line") +
+#     scale_y_continuous(expand=expansion(mult=c(0.1,0.1))) +
+#     stat_pvalue_manual(filt.data.df.test, remove.bracket = T, label.size=3) +
+#     labs(y = "log10(Imputed Raw Abundance)") +
+#     theme_bw() + theme(axis.text = element_text(family = "Arial", color = "black"),
+#                       axis.title = element_text(family = "Arial", color = "black", face="bold"))
+# ggsave(plot=filt_conc_plt, filename=file.path(projdir,"Plots","filt_log10concentration.png"), dpi = 300, height = 3, width = 5)
+
+#####################################################################################
+# Heatmap of imputed and normalized data after outlier removal
+#####################################################################################
+
+norm.filt.plot <- assays(filt.met)$norm_imputed[,hmp_sample_order]
+png(file.path(projdir,"Plots","Heatmap_all_Lipids_filtered_norm.png"), height = 12, width = 10, res = 300, units = 'in')
+pheatmap(norm.filt.plot,
+  color = colorRampPalette(rev(brewer.pal(n = 11, name = "RdBu")))(250),
+  annotation_col = as.data.frame(colData(filt.met))[hmp_sample_order,c("Time","Injury","Leg")],
+  annotation_colors = ann_colors,
+  annotation_legend = TRUE,
+  border_color = NA,
+  #breaks = mat_breaks,
+  scale = "row",
+  cluster_rows = TRUE,
+  cluster_cols = FALSE,
+  clustering_distance_rows = "euclidean",
+  clustering_method = "complete",
+  legend = TRUE,
+  show_rownames = T,
+  show_colnames = T,
+  main = "All Lipids (outliers removed)",
+  fontsize = 10,
+  angle_col = "90",
+  gaps_col = c(9,23)
+)
+dev.off()
+
+#####################################################################################
+# PCA of normalized and filtered object
+#####################################################################################
+
+norm_filt_pca <- prcomp(t(assays(filt.met)$norm_imputed), scale=T)
+summary(norm_filt_pca)
+var_explained <- norm_filt_pca$sdev^2/sum(norm_filt_pca$sdev^2)
+png(file.path(projdir,"Plots","filt_norm_imputed_PCA_var_prop.png"), res=300, units='in', width=6, height=4)
+barplot(var_explained[1:15], names.arg=1:15, xlab="PCs", ylab="Proportion of Variance")
+dev.off()
+
+filt_norm_pca_plt_data <- norm_filt_pca$x %>% 
+  as.data.frame %>%
+  rownames_to_column("Sample") %>%
+  mutate(i = stringr::str_order(Sample, numeric = T)) %>%
+  arrange(i) %>%
+  mutate(Sample = factor(Sample, levels=Sample)) %>%
+  left_join(meta_data %>% select(Condition, Leg, `LC-MS/MS code`), by=c("Sample"="LC-MS/MS code")) %>%
+  group_by(Condition, Leg) %>%
+  mutate(Rep = factor(seq_len(n()))) %>%
+  ungroup() %>%
+  mutate(Condition = factor(Condition, levels=unique(Condition)))
+
+png(file.path(projdir,"Plots","filt_norm_imputed_PCA_PC12.png"), res=300, units='in', width=6, height=6)
+ggplot(filt_norm_pca_plt_data, aes(x=PC1,y=PC2)) + 
+  geom_point(aes(color=Condition, shape=Rep), size=4) +
+  #scale_color_manual(values = col_vector) +
+  ggsci::scale_color_jco() +
+  theme_bw() + coord_equal() +
+  labs(x=paste0("PC1: ",round(var_explained[1]*100,1),"%"),
+       y=paste0("PC2: ",round(var_explained[2]*100,1),"%")) +
+  theme(text = element_text(size=12, color="black"))
+dev.off()
+
+#####################################################################################
+# Find DE lipids
+#####################################################################################
+
+# https://towardsdatascience.com/anovas-three-types-of-estimating-sums-of-squares-don-t-make-the-wrong-choice-91107c77a27a
+# aov and lm use Type 1 Sums of Squares, so the order of independent variables matters! Here, we test for effects of Injury followed by those of Time (Injury is the more important variable). We also don't consider interactions here.
+data.stats <- data.frame()
+for (lipid in levels(filt.data.df$Lipid)) {
+  res.aov2 <- aov(Concentration ~ Injury + Time, data = filt.data.df[filt.data.df$Lipid == lipid,])
+  de <- data.frame("Lipid" = lipid, 
+                  "pval.time" = summary(res.aov2)[[1]]["Time", "Pr(>F)"], 
+                  "pval.injury" = summary(res.aov2)[[1]]["Injury", "Pr(>F)"])
+  de <- cbind(de, t(res.aov2$coefficients))
+  # full_model <- lm(Concentration ~ Injury + Time + Injury:Time, data = filt.data.df[filt.data.df$Lipid == lipid,])
+  # reduced_model <- lm(Concentration ~ Injury + Time, data = filt.data.df[filt.data.df$Lipid == lipid,])
+  # lrt_test <- lmtest::lrtest(full_model, reduced_model)
+  # de <- data.frame(Lipid = lipid, pval = na.omit(lrt_test$`Pr(>Chisq)`))
+
+  data.stats <- rbind(data.stats, de)
+}
+#data.stats$padj <- p.adjust(data.stats$pval, "BH")
+data.stats$padj.time <- p.adjust(data.stats$pval.time, "BH")
+data.stats$padj.injury <- p.adjust(data.stats$pval.injury, "BH")
+
+# filt.met <- diff_test(filt.met, group_factors = c("Injury","Time"))
+# volcano_plot(filt.met,
+#              group_factor="Injury",
+#              label_colors = c("darkseagreen","orange"),
+#              main="Injury comparisons")
+# volcano_plot(filt.met,
+#              group_factor="Time",
+#              label_colors = c("darkseagreen","orange"),
+#              main="Time comparisons")
+
+
+#####################################################################################
+# Heatmap for all DE lipids
+#####################################################################################
+
+sig_metabolites <- data.stats %>% filter(padj.injury < 0.05) %>% pull(Lipid)
+
+#to.plot <- to.plot[,c(1:15,20:23,29:33,16:19,24:28,34:38)] # reorder columns, if removing samples
+#all.de.plot <- data.imputed[sig_metabolites,c(1:15,21:25,31:35,16:20,26:30,36:40)] # reorder columns
+all.de.plot <- assays(filt.met)$norm_imputed[sig_metabolites, hmp_sample_order]
+png(file.path(projdir,"Plots","Heatmap_all_DELipids_filtered.png"), height = 12, width = 10, res = 300, units = 'in')
+pheatmap(all.de.plot,
+  color = colorRampPalette(rev(brewer.pal(n = 11, name = "RdBu")))(250),
+  annotation_col = as.data.frame(colData(filt.met))[hmp_sample_order, c("Time","Injury","Leg")],
+  annotation_colors = ann_colors,
+  annotation_legend = TRUE,
+  border_color = NA,
+  #breaks = mat_breaks,
+  scale = "row",
+  cluster_rows = TRUE,
+  cluster_cols = FALSE,
+  clustering_distance_rows = "euclidean",
+  clustering_method = "complete",
+  legend = TRUE,
+  show_rownames = T,
+  show_colnames = T,
+  main = "All DE Lipids",
+  fontsize = 10,
+  angle_col = "90",
+  gaps_col = c(9,23)
+)
+dev.off()
+
 
 #####################################################################################
 # Export DE and all data for DPGP
@@ -291,25 +507,25 @@ export_data_for_dpgp <- function(data, meta_data, prefix) {
   return(list(data_avg = data_avg, data_fc = data_fc, data_fc_zscore = data_fc_zscore))
 }
 
-sig_data <- data.norm[sig_metabolites, ]
+sig_data <- assays(filt.met)$norm_imputed[sig_metabolites, ]
 #sample_subset <- meta_data %>% filter(Injury != "Uninjured") %>% rownames()
 #sig_data <- data.norm[sig_metabolites, sample_subset]
-sig_data <- export_data_for_dpgp(data = data.norm[sig_metabolites, ],
-                                meta_data = as.data.frame(colData(met)),
+sig_data <- export_data_for_dpgp(data = assays(filt.met)$norm_imputed[sig_metabolites, ],
+                                meta_data = as.data.frame(colData(filt.met)),
                                 prefix = "sig_data")
 
-all_data <- export_data_for_dpgp(data = data.norm,
-                                meta_data = as.data.frame(colData(met)),
+all_data <- export_data_for_dpgp(data = assays(filt.met)$norm_imputed,
+                                meta_data = as.data.frame(colData(filt.met)),
                                 prefix = "all_data")
 
-saveRDS(sig_data, file.path(projdir,"sig_data_for_dpgp.RDS"))
-saveRDS(all_data, file.path(projdir,"all_data_for_dpgp.RDS"))
+# saveRDS(sig_data, file.path(projdir,"sig_data_for_dpgp.RDS"))
+# saveRDS(all_data, file.path(projdir,"all_data_for_dpgp.RDS"))
 
 #####################################################################################
-# Mean and standard deviation of DE lipids
+# Make DPGP trajectory plots for all and DE lipid data
 #####################################################################################
 
-make_DPGP_plot <- function(data, dpgp_clusters) {
+make_DPGP_plot <- function(data, dpgp_clusters, onecol) {
   dpgp_clusters_plot_df <- data[dpgp_clusters$gene, ] %>% 
     tibble::rownames_to_column("gene") %>% 
     pivot_longer(cols = !gene, names_to="day", values_to="zscore") %>%
@@ -333,22 +549,140 @@ make_DPGP_plot <- function(data, dpgp_clusters) {
   panel_labs <- paste0("Cluster ",unique(dpgp_clusters$cluster), ", N=", table(dpgp_clusters$cluster))
   names(panel_labs) <- unique(dpgp_clusters$cluster)
 
-  p <- p + facet_wrap(~cluster, labeller=as_labeller(panel_labs)) +
-      theme(legend.position = "none",
-          text = element_text(family="Arial"),
-          panel.grid.major = element_blank(), 
-          panel.grid.minor = element_blank(),
-          strip.background = element_rect(color="black", fill="gray95"),
-          strip.text = element_text(size = 12, face="bold"),
-          axis.text = element_text(face="bold", color="black", size=12),
-          axis.title = element_text(face="bold", color="black", size=12))
+  if(onecol) {
+    p <- p + facet_wrap(~cluster, labeller=as_labeller(panel_labs), ncol=1) +
+        theme(legend.position = "none",
+            text = element_text(family="Arial"),
+            panel.grid.major = element_blank(), 
+            panel.grid.minor = element_blank(),
+            strip.background = element_rect(color="black", fill="gray95"),
+            strip.text = element_text(size = 12, face="bold"),
+            axis.text = element_text(face="bold", color="black", size=12),
+            axis.title = element_text(face="bold", color="black", size=12))
+  } else {
+    p <- p + facet_wrap(~cluster, labeller=as_labeller(panel_labs)) +
+        theme(legend.position = "none",
+            text = element_text(family="Arial"),
+            panel.grid.major = element_blank(), 
+            panel.grid.minor = element_blank(),
+            strip.background = element_rect(color="black", fill="gray95"),
+            strip.text = element_text(size = 12, face="bold"),
+            axis.text = element_text(face="bold", color="black", size=12),
+            axis.title = element_text(face="bold", color="black", size=12))
+  }
   return(p)
 }
 
 sig_dpgp_clusters <- read.table(file.path(projdir, "DPGP_within_timepoint", "sig_within_timepoint_optimal_clustering.txt"), sep='\t', header=T)
-sig_DPGP_plt <- make_DPGP_plot(as.data.frame(sig_data$data_fc_zscore), sig_dpgp_clusters)
+sig_DPGP_plt <- make_DPGP_plot(as.data.frame(sig_data$data_fc_zscore), sig_dpgp_clusters, F)
 ggsave(plot=sig_DPGP_plt, filename = file.path(projdir,"Plots","DE_cluster_trajectory.png"), dpi=300, width=6, height=6)
 
 all_dpgp_clusters <- read.table(file.path(projdir, "DPGP_within_timepoint", "all_within_timepoint_optimal_clustering.txt"), sep='\t', header=T)
-all_DPGP_plt <- make_DPGP_plot(as.data.frame(all_data$data_fc_zscore), all_dpgp_clusters)
+all_DPGP_plt <- make_DPGP_plot(as.data.frame(all_data$data_fc_zscore), all_dpgp_clusters, F)
 ggsave(plot=all_DPGP_plt, filename = file.path(projdir,"Plots","all_cluster_trajectory.png"), dpi=300, width=6, height=6)
+
+sig_DPGP_onecol_plt <- make_DPGP_plot(as.data.frame(sig_data$data_fc_zscore), sig_dpgp_clusters, T)
+ggsave(plot=sig_DPGP_onecol_plt, filename = file.path(projdir,"Plots","sig_cluster_trajectory_onecol.png"), dpi=300, width=2, height=12)
+
+all_DPGP_onecol_plt <- make_DPGP_plot(as.data.frame(all_data$data_fc_zscore), all_dpgp_clusters, T)
+ggsave(plot=all_DPGP_onecol_plt, filename = file.path(projdir,"Plots","all_cluster_trajectory_onecol.png"), dpi=300, width=2, height=12)
+
+#####################################################################################
+# Add DPGP clusters to heatmap
+#####################################################################################
+
+dpgp_hmp_sample_order <- colData(filt.met) %>%
+  as.data.frame() %>%
+  mutate(Injury = factor(Injury, levels=c("Uninjured","1 mm", "2 mm")), 
+        Time = factor(Time, levels=stringr::str_sort(unique(Time), numeric=T))) %>% 
+  arrange(Time, Injury) %>%
+  rownames()
+
+dpgp_gaps <- colData(filt.met) %>%
+  as.data.frame() %>%
+  mutate(Injury = factor(Injury, levels=c("Uninjured","1 mm", "2 mm")), 
+        Time = factor(Time, levels=stringr::str_sort(unique(Time), numeric=T))) %>% 
+  arrange(Time, Injury) %>%
+  group_by(Time) %>%
+  tally() %>%
+  mutate(gaps = cumsum(n))
+
+dpgp_clust_ann <- data.frame(Cluster = factor(all_dpgp_clusters$cluster))
+rownames(dpgp_clust_ann) <- all_dpgp_clusters$gene
+
+dpgp_ann_colors <- list(
+  Time = c("grey60", col_vector[1:3]),
+  Injury = col_vector[5:7],
+  Leg = col_vector[8:9],
+  Cluster = brewer.pal(11,"Paired")[seq_along(unique(all_dpgp_clusters$cluster))]
+)
+names(dpgp_ann_colors$Time) <- unique(as.data.frame(colData(filt.met))$Time)
+names(dpgp_ann_colors$Injury) <- unique(as.data.frame(colData(filt.met))$Injury)
+names(dpgp_ann_colors$Leg) <- unique(as.data.frame(colData(filt.met))$Leg)
+names(dpgp_ann_colors$Cluster) <- unique(all_dpgp_clusters$cluster)
+
+png(file.path(projdir, "Plots", "Heatmap_all_Lipids_filtered_norm_DPGP.png"), height = 12, width = 10, res = 300, units = 'in')
+pheatmap(assays(filt.met)$norm_imputed[all_dpgp_clusters$gene, dpgp_hmp_sample_order],
+  color = colorRampPalette(rev(brewer.pal(n = 11, name = "RdBu")))(250),
+  annotation_col = as.data.frame(colData(filt.met))[dpgp_hmp_sample_order, c("Time","Injury","Leg")],
+  annotation_colors = dpgp_ann_colors,
+  annotation_row = dpgp_clust_ann, 
+  annotation_legend = TRUE,
+  border_color = NA,
+  #breaks = mat_breaks,
+  scale = "row",
+  cluster_rows = FALSE,
+  cluster_cols = FALSE,
+  clustering_distance_rows = "euclidean",
+  clustering_method = "complete",
+  legend = TRUE,
+  show_rownames = T,
+  show_colnames = T,
+  main = "All Lipids",
+  fontsize = 10,
+  angle_col = "90",
+  gaps_col = dpgp_gaps$gaps
+)
+dev.off()
+
+#####################################################################################
+# Add DPGP clusters to DE lipid heatmap
+#####################################################################################
+
+dpgp_clust_ann <- data.frame(Cluster = factor(sig_dpgp_clusters$cluster))
+rownames(dpgp_clust_ann) <- sig_dpgp_clusters$gene
+
+dpgp_ann_colors <- list(
+  Time = c("grey60", col_vector[1:3]),
+  Injury = col_vector[5:7],
+  Leg = col_vector[8:9],
+  Cluster = brewer.pal(11,"Paired")[seq_along(unique(sig_dpgp_clusters$cluster))]
+)
+names(dpgp_ann_colors$Time) <- unique(as.data.frame(colData(filt.met))$Time)
+names(dpgp_ann_colors$Injury) <- unique(as.data.frame(colData(filt.met))$Injury)
+names(dpgp_ann_colors$Leg) <- unique(as.data.frame(colData(filt.met))$Leg)
+names(dpgp_ann_colors$Cluster) <- unique(sig_dpgp_clusters$cluster)
+
+png(file.path(projdir, "Plots", "Heatmap_all_DELipids_filtered_norm_DPGP.png"), height = 12, width = 10, res = 300, units = 'in')
+pheatmap(assays(filt.met)$norm_imputed[sig_dpgp_clusters$gene, dpgp_hmp_sample_order],
+  color = colorRampPalette(rev(brewer.pal(n = 11, name = "RdBu")))(250),
+  annotation_col = as.data.frame(colData(filt.met))[dpgp_hmp_sample_order, c("Time","Injury","Leg")],
+  annotation_colors = dpgp_ann_colors,
+  annotation_row = dpgp_clust_ann, 
+  annotation_legend = TRUE,
+  border_color = NA,
+  #breaks = mat_breaks,
+  scale = "row",
+  cluster_rows = FALSE,
+  cluster_cols = FALSE,
+  clustering_distance_rows = "euclidean",
+  clustering_method = "complete",
+  legend = TRUE,
+  show_rownames = T,
+  show_colnames = T,
+  main = "All DE Lipids",
+  fontsize = 10,
+  angle_col = "90",
+  gaps_col = dpgp_gaps$gaps
+)
+dev.off()
