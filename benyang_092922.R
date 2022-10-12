@@ -595,15 +595,15 @@ dpgp_hmp_sample_order <- colData(filt.met) %>%
   as.data.frame() %>%
   mutate(Injury = factor(Injury, levels=c("Uninjured","1 mm", "2 mm")), 
         Time = factor(Time, levels=stringr::str_sort(unique(Time), numeric=T))) %>% 
-  arrange(Time, Injury) %>%
+  arrange(Injury, Time) %>%
   rownames()
 
 dpgp_gaps <- colData(filt.met) %>%
   as.data.frame() %>%
   mutate(Injury = factor(Injury, levels=c("Uninjured","1 mm", "2 mm")), 
         Time = factor(Time, levels=stringr::str_sort(unique(Time), numeric=T))) %>% 
-  arrange(Time, Injury) %>%
-  group_by(Time) %>%
+  arrange(Injury, Time) %>%
+  group_by(Injury) %>%
   tally() %>%
   mutate(gaps = cumsum(n))
 
@@ -663,8 +663,8 @@ names(dpgp_ann_colors$Injury) <- unique(as.data.frame(colData(filt.met))$Injury)
 names(dpgp_ann_colors$Leg) <- unique(as.data.frame(colData(filt.met))$Leg)
 names(dpgp_ann_colors$Cluster) <- unique(sig_dpgp_clusters$cluster)
 
-png(file.path(projdir, "Plots", "Heatmap_all_DELipids_filtered_norm_DPGP.png"), height = 12, width = 10, res = 300, units = 'in')
-pheatmap(assays(filt.met)$norm_imputed[sig_dpgp_clusters$gene, dpgp_hmp_sample_order],
+png(file.path(projdir, "Plots", "Heatmap_all_DELipids_filtered_DPGP.png"), height = 12, width = 10, res = 300, units = 'in')
+pheatmap(assays(filt.met)$imputed[sig_dpgp_clusters$gene, dpgp_hmp_sample_order],
   color = colorRampPalette(rev(brewer.pal(n = 11, name = "RdBu")))(250),
   annotation_col = as.data.frame(colData(filt.met))[dpgp_hmp_sample_order, c("Time","Injury","Leg")],
   annotation_colors = dpgp_ann_colors,
