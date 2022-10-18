@@ -35,9 +35,10 @@ assay[1:5,1:5]
 meta_data <- read_excel(file.path(projdir, "TA VML injury_LC-MS_08-13-21 extract JAL.xlsx"), sheet = 1, skip = 3) %>% as.data.frame()
 meta_data$`Code/mouse#` <- as.numeric(meta_data$`Code/mouse#`)
 rownames(meta_data) <- meta_data$`LC-MS/MS code`
-meta_data <- mutate(meta_data, Condition = paste(Time, Injury, sep="_"))
+meta_data$Injury <- factor(meta_data$Injury, levels = c("Uninjured","1 mm","2 mm"))
 meta_data$Time <- factor(meta_data$Time, levels=stringr::str_sort(unique(meta_data$Time), numeric=T))
 meta_data$Leg <- factor(recode(meta_data$Leg, right = "Right", rght = "Right"))
+meta_data <- mutate(meta_data, Condition = factor(paste(Time, Injury, sep="_"), ))
 
 rowData <- rownames(assay) %>% as.data.frame()
 colnames(rowData) <- "BIOCHEMICAL"
@@ -417,11 +418,19 @@ dev.off()
 # aov and lm use Type 1 Sums of Squares, so the order of independent variables matters! Here, we test for effects of Injury followed by those of Time (Injury is the more important variable). We also don't consider interactions here.
 data.stats <- data.frame()
 for (lipid in levels(filt.data.df$Lipid)) {
-  res.aov2 <- aov(Concentration ~ Injury + Time, data = filt.data.df[filt.data.df$Lipid == lipid,])
+  # MODIFIED TO EXCLUDE UNINJURED FROM DE LIPID CALCULATIONS
+  no_uninjured_data <- filt.data.df %>% filter(Time != "Day 0" & Injury != "Uninjured") %>% droplevels()
+  res.aov2 <- aov(Concentration ~ 0 + Condition, data = no_uninjured_data[no_uninjured_data$Lipid == lipid,])
   de <- data.frame("Lipid" = lipid, 
-                  "pval.time" = summary(res.aov2)[[1]]["Time", "Pr(>F)"], 
-                  "pval.injury" = summary(res.aov2)[[1]]["Injury", "Pr(>F)"])
+                  "pval" = summary(res.aov2)[[1]]["Condition", "Pr(>F)"])
   de <- cbind(de, t(res.aov2$coefficients))
+
+  # res.aov2 <- aov(Concentration ~ Condition, data = no_uninjured_data[no_uninjured_data$Lipid == lipid,])
+  # de <- data.frame("Lipid" = lipid, 
+  #                 "pval.time" = summary(res.aov2)[[1]]["Time", "Pr(>F)"], 
+  #                 "pval.injury" = summary(res.aov2)[[1]]["Injury", "Pr(>F)"])
+  # de <- cbind(de, t(res.aov2$coefficients))
+
   # full_model <- lm(Concentration ~ Injury + Time + Injury:Time, data = filt.data.df[filt.data.df$Lipid == lipid,])
   # reduced_model <- lm(Concentration ~ Injury + Time, data = filt.data.df[filt.data.df$Lipid == lipid,])
   # lrt_test <- lmtest::lrtest(full_model, reduced_model)
@@ -429,26 +438,52 @@ for (lipid in levels(filt.data.df$Lipid)) {
 
   data.stats <- rbind(data.stats, de)
 }
-#data.stats$padj <- p.adjust(data.stats$pval, "BH")
-data.stats$padj.time <- p.adjust(data.stats$pval.time, "BH")
-data.stats$padj.injury <- p.adjust(data.stats$pval.injury, "BH")
+data.stats$padj <- p.adjust(data.stats$pval, "BH")
+# data.stats$padj.time <- p.adjust(data.stats$pval.time, "BH")
+# data.stats$padj.injury <- p.adjust(data.stats$pval.injury, "BH")
 
 # filt.met <- diff_test(filt.met, group_factors = c("Injury","Time"))
-# volcano_plot(filt.met,
-#              group_factor="Injury",
-#              label_colors = c("darkseagreen","orange"),
-#              main="Injury comparisons")
+#  
 # volcano_plot(filt.met,
 #              group_factor="Time",
 #              label_colors = c("darkseagreen","orange"),
 #              main="Time comparisons")
+
+#####################################################################################
+# Find DE lipids using limma-voom
+#####################################################################################
+
+design_data <- as.data.frame(colData(filt.met)) %>% 
+  filter(Time != "Day 0" & Injury != "Uninjured") %>% 
+  mutate(Time = factor(gsub(" ","",Time)),
+    Injury = factor(gsub(" ","",Injury)),
+    Condition = factor(paste(Time, Injury, sep="_"))) %>%
+  droplevels() 
+design_matrix <- model.matrix(~ 0 + Condition, data = design_data)
+no_uninjured_data <- assays(filt.met)$imputed
+no_uninjured_data <- no_uninjured_data[,colData(filt.met)$Time != "Day 0"]
+
+fit <- lmFit(no_uninjured_data, design = design_matrix)
+colnames(fit$coefficients)
+# [1] "ConditionDay14_1mm" "ConditionDay14_2mm" "ConditionDay3_1mm"
+# [4] "ConditionDay3_2mm"  "ConditionDay7_1mm"  "ConditionDay7_2mm"
+cont.matrix=makeContrasts(
+    d14_2mm_vs_1mm="ConditionDay14_2mm - ConditionDay14_1mm",
+    d7_2mm_vs_1mm="ConditionDay7_2mm - ConditionDay7_1mm",
+    d3_2mm_vs_1mm="ConditionDay3_2mm - ConditionDay3_1mm",
+    levels=design_matrix)
+cont.fit <- contrasts.fit(fit, cont.matrix)
+y <- voom(no_uninjured_data, design_matrix, plot = T)
+fit_ebayes <- eBayes(cont.fit)
+top.table <- topTable(fit_ebayes, sort.by = "F", p.value = 0.05, n = Inf)
 
 
 #####################################################################################
 # Heatmap for all DE lipids
 #####################################################################################
 
-sig_metabolites <- data.stats %>% filter(padj.injury < 0.05) %>% pull(Lipid)
+sig_metabolites <- data.stats %>% filter(padj < 0.05) %>% pull(Lipid)
+#sig_metabolites <- data.stats %>% filter(padj.injury < 0.05) %>% pull(Lipid)
 
 #to.plot <- to.plot[,c(1:15,20:23,29:33,16:19,24:28,34:38)] # reorder columns, if removing samples
 #all.de.plot <- data.imputed[sig_metabolites,c(1:15,21:25,31:35,16:20,26:30,36:40)] # reorder columns
@@ -456,7 +491,7 @@ all.de.plot <- assays(filt.met)$norm_imputed[sig_metabolites, hmp_sample_order]
 png(file.path(projdir,"Plots","Heatmap_all_DELipids_filtered.png"), height = 12, width = 10, res = 300, units = 'in')
 pheatmap(all.de.plot,
   color = colorRampPalette(rev(brewer.pal(n = 11, name = "RdBu")))(250),
-  annotation_col = as.data.frame(colData(filt.met))[hmp_sample_order, c("Time","Injury","Leg")],
+  annotation_col = as.data.frame(colData(filt.met))[hmp_sample_order, c("Time","Injury")],
   annotation_colors = ann_colors,
   annotation_legend = TRUE,
   border_color = NA,
@@ -478,25 +513,24 @@ dev.off()
 
 
 #####################################################################################
+
 # Export DE and all data for DPGP
 #####################################################################################
 
-export_data_for_dpgp <- function(data, meta_data, prefix) {
+export_data_for_dpgp <- function(data, meta_data, fc_type, prefix) {
   # average by condition
-  data_avg <- data.frame(d0_left = rowMeans(data[,meta_data %>% filter(Time == "Day 0" & Leg == "Left") %>% rownames()]),
-                            d0_right = rowMeans(data[,meta_data %>% filter(Time == "Day 0" & Leg == "Right") %>% rownames()]),
-                            d3_1mm = rowMeans(data[,meta_data %>% filter(Condition == "Day 3_1 mm") %>% rownames()]),
-                            d3_2mm = rowMeans(data[,meta_data %>% filter(Condition == "Day 3_2 mm") %>% rownames()]),
-                            d7_1mm = rowMeans(data[,meta_data %>% filter(Condition == "Day 7_1 mm") %>% rownames()]),
-                            d7_2mm = rowMeans(data[,meta_data %>% filter(Condition == "Day 7_2 mm") %>% rownames()]),
-                            d14_1mm = rowMeans(data[,meta_data %>% filter(Condition == "Day 14_1 mm") %>% rownames()]),
-                            d14_2mm = rowMeans(data[,meta_data %>% filter(Condition == "Day 14_2 mm") %>% rownames()]))
+  data_avg <- data.frame(d0 = rowMeans(data[,meta_data %>% filter(Condition == "Day 0_Uninjured") %>% rownames()]),
+                          d3_1mm = rowMeans(data[,meta_data %>% filter(Condition == "Day 3_1 mm") %>% rownames()]),
+                          d3_2mm = rowMeans(data[,meta_data %>% filter(Condition == "Day 3_2 mm") %>% rownames()]),
+                          d7_1mm = rowMeans(data[,meta_data %>% filter(Condition == "Day 7_1 mm") %>% rownames()]),
+                          d7_2mm = rowMeans(data[,meta_data %>% filter(Condition == "Day 7_2 mm") %>% rownames()]),
+                          d14_1mm = rowMeans(data[,meta_data %>% filter(Condition == "Day 14_1 mm") %>% rownames()]),
+                          d14_2mm = rowMeans(data[,meta_data %>% filter(Condition == "Day 14_2 mm") %>% rownames()]))
   # calculate fold changes
-  data_fc <- data.frame(d0_fc = data_avg$d0_right / data_avg$d0_left,
-                      d3_fc = data_avg$d3_2mm / data_avg$d3_1mm,
-                      d7_fc = data_avg$d7_2mm / data_avg$d7_1mm,
-                      d14_fc = data_avg$d14_2mm / data_avg$d14_1mm,
-                      row.names = rownames(data_avg))
+  data_fc <- data.frame(d3_fc = data_avg$d3_2mm / data_avg$d3_1mm,
+                        d7_fc = data_avg$d7_2mm / data_avg$d7_1mm,
+                        d14_fc = data_avg$d14_2mm / data_avg$d14_1mm,
+                        row.names = rownames(data_avg))
   # find z-scores of fold changes
   data_fc_zscore <- t(scale(t(data_fc), center=T, scale=T))
   # write tables
@@ -533,8 +567,8 @@ make_DPGP_plot <- function(data, dpgp_clusters, onecol) {
     group_by(cluster, day) %>%
     summarise(mean = mean(zscore), sd = sd(zscore)) %>%
     mutate(ymin = mean - 2*sd, ymax = mean + 2*sd)
-  dpgp_clusters_plot_df$day <- factor(dpgp_clusters_plot_df$day, levels=c("d0_fc","d3_fc","d7_fc","d14_fc"))
-  levels(dpgp_clusters_plot_df$day) <- c("d0_fc"="d0", "d3_fc"="d3", "d7_fc"="d7", "d14_fc"="d14")
+  dpgp_clusters_plot_df$day <- factor(dpgp_clusters_plot_df$day, levels=c("d3_fc","d7_fc","d14_fc"))
+  levels(dpgp_clusters_plot_df$day) <- c("d3_fc"="d3", "d7_fc"="d7", "d14_fc"="d14")
   dpgp_clusters_plot_df$cluster <- factor(dpgp_clusters_plot_df$cluster)
 
   p = ggplot(data=dpgp_clusters_plot_df, aes(x=day)) + 
@@ -575,11 +609,11 @@ make_DPGP_plot <- function(data, dpgp_clusters, onecol) {
 
 sig_dpgp_clusters <- read.table(file.path(projdir, "DPGP_within_timepoint", "sig_within_timepoint_optimal_clustering.txt"), sep='\t', header=T)
 sig_DPGP_plt <- make_DPGP_plot(as.data.frame(sig_data$data_fc_zscore), sig_dpgp_clusters, F)
-ggsave(plot=sig_DPGP_plt, filename = file.path(projdir,"Plots","DE_cluster_trajectory.png"), dpi=300, width=6, height=6)
+ggsave(plot=sig_DPGP_plt, filename = file.path(projdir,"Plots","DE_cluster_trajectory.png"), dpi=300, width=6, height=4)
 
 all_dpgp_clusters <- read.table(file.path(projdir, "DPGP_within_timepoint", "all_within_timepoint_optimal_clustering.txt"), sep='\t', header=T)
 all_DPGP_plt <- make_DPGP_plot(as.data.frame(all_data$data_fc_zscore), all_dpgp_clusters, F)
-ggsave(plot=all_DPGP_plt, filename = file.path(projdir,"Plots","all_cluster_trajectory.png"), dpi=300, width=6, height=6)
+ggsave(plot=all_DPGP_plt, filename = file.path(projdir,"Plots","all_cluster_trajectory.png"), dpi=300, width=6, height=4)
 
 sig_DPGP_onecol_plt <- make_DPGP_plot(as.data.frame(sig_data$data_fc_zscore), sig_dpgp_clusters, T)
 ggsave(plot=sig_DPGP_onecol_plt, filename = file.path(projdir,"Plots","sig_cluster_trajectory_onecol.png"), dpi=300, width=2, height=12)
@@ -613,18 +647,16 @@ rownames(dpgp_clust_ann) <- all_dpgp_clusters$gene
 dpgp_ann_colors <- list(
   Time = c("grey60", col_vector[1:3]),
   Injury = col_vector[5:7],
-  Leg = col_vector[8:9],
   Cluster = brewer.pal(11,"Paired")[seq_along(unique(all_dpgp_clusters$cluster))]
 )
 names(dpgp_ann_colors$Time) <- unique(as.data.frame(colData(filt.met))$Time)
 names(dpgp_ann_colors$Injury) <- unique(as.data.frame(colData(filt.met))$Injury)
-names(dpgp_ann_colors$Leg) <- unique(as.data.frame(colData(filt.met))$Leg)
 names(dpgp_ann_colors$Cluster) <- unique(all_dpgp_clusters$cluster)
 
 png(file.path(projdir, "Plots", "Heatmap_all_Lipids_filtered_norm_DPGP.png"), height = 12, width = 10, res = 300, units = 'in')
 pheatmap(assays(filt.met)$norm_imputed[all_dpgp_clusters$gene, dpgp_hmp_sample_order],
   color = colorRampPalette(rev(brewer.pal(n = 11, name = "RdBu")))(250),
-  annotation_col = as.data.frame(colData(filt.met))[dpgp_hmp_sample_order, c("Time","Injury","Leg")],
+  annotation_col = as.data.frame(colData(filt.met))[dpgp_hmp_sample_order, c("Time","Injury")],
   annotation_colors = dpgp_ann_colors,
   annotation_row = dpgp_clust_ann, 
   annotation_legend = TRUE,
@@ -655,18 +687,16 @@ rownames(dpgp_clust_ann) <- sig_dpgp_clusters$gene
 dpgp_ann_colors <- list(
   Time = c("grey60", col_vector[1:3]),
   Injury = col_vector[5:7],
-  Leg = col_vector[8:9],
   Cluster = brewer.pal(11,"Paired")[seq_along(unique(sig_dpgp_clusters$cluster))]
 )
 names(dpgp_ann_colors$Time) <- unique(as.data.frame(colData(filt.met))$Time)
 names(dpgp_ann_colors$Injury) <- unique(as.data.frame(colData(filt.met))$Injury)
-names(dpgp_ann_colors$Leg) <- unique(as.data.frame(colData(filt.met))$Leg)
 names(dpgp_ann_colors$Cluster) <- unique(sig_dpgp_clusters$cluster)
 
-png(file.path(projdir, "Plots", "Heatmap_all_DELipids_filtered_DPGP.png"), height = 12, width = 10, res = 300, units = 'in')
-pheatmap(assays(filt.met)$imputed[sig_dpgp_clusters$gene, dpgp_hmp_sample_order],
+png(file.path(projdir, "Plots", "Heatmap_all_DELipids_filtered_norm_DPGP.png"), height = 12, width = 10, res = 300, units = 'in')
+pheatmap(assays(filt.met)$norm_imputed[sig_dpgp_clusters$gene, dpgp_hmp_sample_order],
   color = colorRampPalette(rev(brewer.pal(n = 11, name = "RdBu")))(250),
-  annotation_col = as.data.frame(colData(filt.met))[dpgp_hmp_sample_order, c("Time","Injury","Leg")],
+  annotation_col = as.data.frame(colData(filt.met))[dpgp_hmp_sample_order, c("Time","Injury")],
   annotation_colors = dpgp_ann_colors,
   annotation_row = dpgp_clust_ann, 
   annotation_legend = TRUE,
